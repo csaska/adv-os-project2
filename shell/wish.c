@@ -5,9 +5,6 @@
 #include "string.h"
 #include "unistd.h"
 
-
-// built-ins: exit, cd, path
-
 void print_ps1() {
     fprintf(stderr, "wish> ");
 }
@@ -47,20 +44,74 @@ bool is_interactive_mode(int argc) {
     return false;
 }
 
+// built-ins: cd, exit, and path
+int wish_cd(int argc, char *args[]) {
+    printf("We are in wish_cd");
+    // check exactly 1 arg is passed to cd
+    if (argc != 2) {
+        print_error();
+        return EXIT_FAILURE;
+    }
+    printf("Calling chdir with %s", args[1]);
+    if (chdir(args[1]) == -1) {
+        print_error();
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+
+int wish_exit(int argc, char *args[]) {
+    // check exactly no args are passed to exit
+    if (argc != 1) {
+        print_error();
+        return EXIT_FAILURE;
+    }
+    exit(0);
+}
+
+int wish_path(int argc, char *args[]) {
+    if (argc == 1) {
+        // TODO: clear path
+    } else {
+        // TODO: add each arg to $PATH
+        // TODO: should we error check that they are all delimited by whitespace?
+    }
+    return 0;
+}
+
+char *builtin_options[] = {
+  "cd",
+  "exit",
+  "path"
+};
+
+int num_of_builtins() {
+  return sizeof(builtin_options) / sizeof(char *);
+}
+
+int (*builtin_func[]) (int argc, char **) = {
+  &wish_cd,
+  &wish_exit,
+  &wish_path,
+};
+
 char* wish_read_line(FILE *input) {
     char *line = NULL;
     size_t buffsize = 0;
     if (getline(&line, &buffsize, input) == -1) {
         if (feof(input)) {
            if (input != stdin) {
+                printf("we are in here 1");
                 fclose(input); 
             }
+            printf("we are in here 2");
             exit(EXIT_SUCCESS);
         } else {
             print_error();
             exit(EXIT_FAILURE);
         }
     }
+    printf("we are here 3");
     return line;
 }
 
@@ -87,18 +138,56 @@ char *trimwhitespace(char *str) {
 
 struct Command {
     char *cmd;
+    int argc;
+    char **args;
     char *outfile;
     struct Command *next;
 };
 
+#define ARG_BUFSIZE 64
+#define ARG_DELIM " \t"
+
 struct Command* create_command_from_string(char *trimmed_string) {
+    // Split command into args
+    int bufsize = ARG_BUFSIZE, position = 0;
+    char **args = malloc(bufsize * sizeof(char*));
+    char *token;
+
+    if (args == NULL) {
+        print_error();
+        exit(EXIT_FAILURE);
+    }
+
+    token = strtok(trimmed_string, ARG_DELIM);
+    while (token != NULL) {
+        args[position] = token;
+        position++;
+
+        if (position >= bufsize) {
+            bufsize += ARG_BUFSIZE;
+            args = realloc(args, bufsize * sizeof(char*));
+            if (!args) {
+                print_error();
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        token = strtok(NULL, ARG_DELIM);
+    }
+    args[position] = NULL;
+
+    // Create command object
     struct Command *node = (struct Command*)malloc(sizeof(struct Command)); 
-    node->cmd = trimmed_string;
-    node->next = NULL;
     if (node == NULL) {
         print_error();
         exit(EXIT_FAILURE);
     }
+    node->cmd = args[0];
+    node->next = NULL;
+    node->args = args;
+    node->argc = position;
+
+
 
     // split on first white space and save to node->cmd
 
@@ -143,8 +232,10 @@ struct Command* wish_tokenize_line(char *line) {
 
 char* concat(const char *s1, const char *s2) {
     char *result = malloc(strlen(s1) + strlen(s2) + 2);
-
-    // TODO: check if malloc failed
+    if (result == NULL) {
+        print_error();
+        return "";
+    }
 
     strcpy(result, s1);
     strcat(result, "/");
@@ -152,14 +243,14 @@ char* concat(const char *s1, const char *s2) {
     return result;
 }
 
-char *find_command_in_path(char *cmd, char *path) {
-    char *token;
+char *find_command_in_path(char *cmd, char *PATH) {
+    char *path;
     const char delim[2] = ":";
 
-    token = strtok(path, delim);
-    while (token != NULL) {
+    path = strtok(PATH, delim);
+    while (path != NULL) {
         // test if command exists at directory from $PATH
-        char* exe = concat(token, cmd);
+        char* exe = concat(path, cmd);
         int result = access(exe, F_OK);
         if (result == 0) {
             return exe;
@@ -167,13 +258,40 @@ char *find_command_in_path(char *cmd, char *path) {
         free(exe);
 
         // move on to the next path in $PATH
-        token = strtok(NULL, delim);
+        path = strtok(NULL, delim);
     }
     return "";
 }
 
+void print_command(struct Command *curr_cmd) {
+    printf("cmd=%s, argc=%d, ", curr_cmd->cmd, curr_cmd->argc);
+    for (int i = 0; i < curr_cmd->argc; i++) {
+        if (i > 0) {
+            printf(", ");
+        }
+        printf("args_%d=%s", i, curr_cmd->args[i]);
+    }
+    printf("\n");
+}
+
 void wish_execute(struct Command *curr_cmd) {
+    // run built-ins using syscalls
+    for (int i = 0; i < num_of_builtins(); i++) {
+        if (strcmp(curr_cmd->cmd, builtin_options[i]) == 0) {
+            printf("Executing builtin %s\n", builtin_options[i]);
+            print_command(curr_cmd);
+            (*builtin_func[i])(curr_cmd->argc, curr_cmd->args);
+
+            // TODO: free member variables of struct
+            free(curr_cmd);
+            return;
+        }
+    }
+
+    // run commands as child process
     while (curr_cmd != NULL) {
+        print_command(curr_cmd);
+
         // find cmd in $PATH
         char *path = strdup(getenv("PATH"));
         char *exe = find_command_in_path(curr_cmd->cmd, path);
@@ -185,8 +303,7 @@ void wish_execute(struct Command *curr_cmd) {
             int ret = fork();
             if (ret == 0) {
                 // child
-                char *args[] = { curr_cmd->cmd, NULL };
-                execv(exe, args);
+                execv(exe, curr_cmd->args);
 
                 // TODO: exit with error code of execv
                 exit(0);
@@ -226,7 +343,9 @@ int main(int argc, char *argv[]) {
         }
 
         // read line on input
+        printf("line read start");
         char *line = wish_read_line(input);
+        printf("line read end");
 
         // parse line into tokens
         struct Command *cmd_list = wish_tokenize_line(line);
